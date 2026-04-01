@@ -16,9 +16,93 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update contributors list
-        uses: akhilmhdh/contributors-readme-action@v2.3.10
-        with:
-          sort_order: ASC
+      - name: Fetch and sort contributors (newest first)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'EOF'
+          import urllib.request
+          import json
+          import re
+
+          headers = {
+              "Authorization": "token ${{ secrets.GITHUB_TOKEN }}",
+              "Accept": "application/vnd.github.v3+json",
+              "User-Agent": "contributors-workflow"
+          }
+
+          # Fetch all contributors (sorted by commit count desc by default)
+          contributors = []
+          page = 1
+          while True:
+              url = f"https://api.github.com/repos/${{ github.repository }}/contributors?per_page=100&page={page}"
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read())
+              if not data:
+                  break
+              contributors.extend(data)
+              page += 1
+
+          # For each contributor, find their first commit date
+          def get_first_commit_date(login):
+              url = f"https://api.github.com/repos/${{ github.repository }}/commits?author={login}&per_page=1&order=asc"
+              req = urllib.request.Request(url, headers=headers)
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      data = json.loads(resp.read())
+                  if data:
+                      return data[0]["commit"]["author"]["date"]
+              except:
+                  pass
+              return ""
+
+          # Sort by first commit date descending (newest contributor first)
+          for c in contributors:
+              c["first_commit"] = get_first_commit_date(c["login"])
+
+          contributors.sort(key=lambda c: c["first_commit"], reverse=True)
+
+          # Build the table HTML (6 columns per row)
+          cols = 6
+          rows = [contributors[i:i+cols] for i in range(0, len(contributors), cols)]
+          lines = ["<table>", "\t<tbody>"]
+          for row in rows:
+              lines.append("\t\t<tr>")
+              for c in row:
+                  lines.append(f"""            <td align="center">
+                  <a href="{c['html_url']}">
+                      <img src="{c['avatar_url']}" width="100;" alt="{c['login']}"/>
+                      <br />
+                      <sub><b>{c['login']}</b></sub>
+                  </a>
+              </td>""")
+              lines.append("\t\t</tr>")
+          lines.append("\t</tbody>")
+          lines.append("</table>")
+          table = "\n".join(lines)
+
+          # Replace the section in README.md
+          with open("README.md", "r") as f:
+              content = f.read()
+
+          new_content = re.sub(
+              r"<!-- readme: contributors -start -->.*?<!-- readme: contributors -end -->",
+              f"<!-- readme: contributors -start -->\n{table}\n<!-- readme: contributors -end -->",
+              content,
+              flags=re.DOTALL
+          )
+
+          with open("README.md", "w") as f:
+              f.write(new_content)
+
+          print(f"Updated {len(contributors)} contributors, newest first.")
+          EOF
+
+      - name: Commit changes
+        run: |
+          git config user.name "contrib-readme-action"
+          git config user.email "contrib-readme-action@noreply.github.com"
+          git add README.md
+          git diff --staged --quiet || git commit -m "docs(contributor): contrib-readme-action has updated readme"
+          git push
